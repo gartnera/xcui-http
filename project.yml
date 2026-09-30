@@ -23,6 +23,10 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.agartner.xcuihttp
         GENERATE_INFOPLIST_FILE: YES
+        # Merged into the generated Info.plist: XCUIHTTPSource, a hash of the
+        # runner's sources that xcui-http passes in to tell stale builds apart.
+        INFOPLIST_FILE: Runner-Info.plist
+        XCUIHTTP_SOURCE: dev
         # The runner app listens on the network on devices.
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Lets development tools drive the UI.
 

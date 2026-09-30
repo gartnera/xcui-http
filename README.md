@@ -42,15 +42,20 @@ Simulator gets its own port. When more than one is running, pass
 `--session <name>` (or set `XCUIHTTP_SESSION`); `xcui-http list` shows them and
 `xcui-http stop --all` stops them all.
 
+`start` is also how a session is updated. Each runner reports a hash of the
+sources it was built from; starting a session that's already running reuses
+it when that matches the checkout, and otherwise rebuilds and replaces it.
+`list` and every command point out a session that's out of date.
+
 ```bash
 xcui-http start --app com.example.app --sim "iPhone 17 Pro"
 xcui-http start --app com.example.app --sim "iPhone Air"
 xcui-http tap Settings --session iphone-air
 ```
 
-`xcui-http start` regenerates the project, builds the runner (one build at a
-time across sessions), runs it in the background (output: `xcui-http log`),
-waits for it to serve, then launches the
+`xcui-http start` builds the runner if the checkout changed since the last
+build (one build at a time across sessions), runs it in the background
+(output: `xcui-http log`), waits for it to serve, then launches the
 app (`--no-launch` to leave it as it is). On a device it
 generates the token that off-device requests need and finds the device's
 CoreDevice tunnel address (works over Wi-Fi), re-discovering it if the tunnel
@@ -63,7 +68,7 @@ listens on all interfaces and requires `X-Driver-Token` from off the device.
 
 | Route | Body |
 | --- | --- |
-| `GET /ping` | replies with the default app's bundle id |
+| `GET /ping` | `{"app": <default bundle id>, "source": <source hash>}` |
 | `GET /tree` | |
 | `GET /screenshot` | PNG at 1x, so pixels match the tree's points; `?scale=` up to the device's (e.g. 3) |
 | `POST /tap` | ref, identifier/label, or `x,y` |

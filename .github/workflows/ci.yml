@@ -9,12 +9,30 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash   # -eo pipefail, unlike the default `bash -e`
+
 jobs:
-  build:
+  ci:
     runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+
+      # A cold Simulator can take ten minutes to boot on these machines, so
+      # start it first and let it boot while everything else builds. By UDID:
+      # a name can match one Simulator per iOS version, so take an iPhone on
+      # the newest iOS.
+      - name: Boot a Simulator
+        run: |
+          sim=$(xcrun simctl list devices available --json | jq -c '[.devices | to_entries
+            | map(select(.key | contains("iOS"))) | sort_by(.key | [scan("[0-9]+") | tonumber])
+            | reverse[] | .key as $runtime | .value[] | select(.name | startswith("iPhone"))
+            | . + {runtime: $runtime}] | first')
+          echo "$sim"
+          echo "SIM=$(jq -r .udid <<<"$sim")" >> "$GITHUB_ENV"
+          if [ "$(jq -r .state <<<"$sim")" != Booted ]; then xcrun simctl boot "$(jq -r .udid <<<"$sim")"; fi
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -22,21 +40,21 @@ jobs:
       - name: Build the CLI
         run: swift build -c release
 
-      - name: Build the runner
-        run: make build
-
       # Drives Settings end to end: start (build, serve, launch), tree, tap,
-      # screenshot, stop.
+      # screenshot; then starting again reuses the session, and starting after
+      # a stop skips the build.
       - name: Drive a Simulator
         run: |
-          sim=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone [^()]+' | sed 's/ *$//')
-          echo "Simulator: $sim"
           x=.build/release/xcui-http
-          $x start --app com.apple.Preferences --sim "$sim"
+          $x start --app com.apple.Preferences --sim "$SIM"
           $x tree | tee tree.txt | head -20
           grep -q 'navbar #Settings' tree.txt
           $x tap General | grep 'navbar #General'
           $x screenshot settings.png
+          $x start --app com.apple.Preferences --sim "$SIM" | grep 'already running'
+          $x stop
+          $x start --app com.apple.Preferences --sim "$SIM" 2>&1 | tee restart.txt
+          if grep -q 'building the runner' restart.txt; then echo "rebuilt an up-to-date runner"; exit 1; fi
           $x stop
 
       - name: Upload logs and screenshot
