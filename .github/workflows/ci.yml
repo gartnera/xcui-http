@@ -22,13 +22,17 @@ jobs:
 
       # A cold Simulator can take ten minutes to boot on these machines, so
       # start it first and let it boot while everything else builds. By UDID:
-      # a name can match one Simulator per iOS version.
+      # a name can match one Simulator per iOS version, so take an iPhone on
+      # the newest iOS.
       - name: Boot a Simulator
         run: |
-          sim=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone ' | grep -oE '[0-9A-F-]{36}')
-          echo "SIM=$sim" >> "$GITHUB_ENV"
-          xcrun simctl list devices | grep "$sim"
-          xcrun simctl boot "$sim"
+          sim=$(xcrun simctl list devices available --json | jq -c '[.devices | to_entries
+            | map(select(.key | contains("iOS"))) | sort_by(.key | [scan("[0-9]+") | tonumber])
+            | reverse[] | .key as $runtime | .value[] | select(.name | startswith("iPhone"))
+            | . + {runtime: $runtime}] | first')
+          echo "$sim"
+          echo "SIM=$(jq -r .udid <<<"$sim")" >> "$GITHUB_ENV"
+          if [ "$(jq -r .state <<<"$sim")" != Booted ]; then xcrun simctl boot "$(jq -r .udid <<<"$sim")"; fi
 
       - name: Install XcodeGen
         run: brew install xcodegen
