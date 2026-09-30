@@ -6,7 +6,6 @@
 #
 # Then: xcui-http start --app <bundle id>  (xcui-http help for the rest)
 
-SIM     ?= iPhone 17
 PROJECT ?= XCUIHTTP.xcodeproj
 DERIVED ?= build
 PREFIX  ?= $(HOME)/.local
@@ -18,7 +17,7 @@ project:
 
 build: project
 	xcodebuild build-for-testing -project $(PROJECT) -scheme XCUIHTTP \
-	  -destination 'platform=iOS Simulator,name=$(SIM)' -derivedDataPath $(DERIVED) \
+	  -destination 'generic/platform=iOS Simulator' -derivedDataPath $(DERIVED) \
 	  CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO AD_HOC_CODE_SIGNING_ALLOWED=YES
 
 # xcui-http finds project.yml through its build path, so keep this checkout where it is

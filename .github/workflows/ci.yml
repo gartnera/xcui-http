@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build the CLI
+        run: swift build -c release
+
+      - name: Build the runner
+        run: make build
+
+      # Drives Settings end to end: start (build, serve, launch), tree, tap,
+      # screenshot, stop.
+      - name: Drive a Simulator
+        run: |
+          sim=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone [^()]+' | sed 's/ *$//')
+          echo "Simulator: $sim"
+          x=.build/release/xcui-http
+          $x start --app com.apple.Preferences --sim "$sim"
+          $x tree | tee tree.txt | head -20
+          grep -q 'navbar #Settings' tree.txt
+          $x tap General | grep 'navbar #General'
+          $x screenshot settings.png
+          $x stop
+
+      - name: Upload logs and screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcui-http
+          path: |
+            ~/.local/state/xcui-http/sessions/*.log
+            settings.png
+          if-no-files-found: ignore
