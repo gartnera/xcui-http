@@ -9,12 +9,26 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash   # -eo pipefail, unlike the default `bash -e`
+
 jobs:
   ci:
     runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+
+      # A cold Simulator can take ten minutes to boot on these machines, so
+      # start it first and let it boot while everything else builds. By UDID:
+      # a name can match one Simulator per iOS version.
+      - name: Boot a Simulator
+        run: |
+          sim=$(xcrun simctl list devices available | grep -m1 -E '^ +iPhone ' | grep -oE '[0-9A-F-]{36}')
+          echo "SIM=$sim" >> "$GITHUB_ENV"
+          xcrun simctl list devices | grep "$sim"
+          xcrun simctl boot "$sim"
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -27,17 +41,15 @@ jobs:
       # a stop skips the build.
       - name: Drive a Simulator
         run: |
-          sim=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone [^()]+' | sed 's/ *$//')
-          echo "Simulator: $sim"
           x=.build/release/xcui-http
-          $x start --app com.apple.Preferences --sim "$sim"
+          $x start --app com.apple.Preferences --sim "$SIM"
           $x tree | tee tree.txt | head -20
           grep -q 'navbar #Settings' tree.txt
           $x tap General | grep 'navbar #General'
           $x screenshot settings.png
-          $x start --app com.apple.Preferences --sim "$sim" | grep 'already running'
+          $x start --app com.apple.Preferences --sim "$SIM" | grep 'already running'
           $x stop
-          $x start --app com.apple.Preferences --sim "$sim" 2>&1 | tee restart.txt
+          $x start --app com.apple.Preferences --sim "$SIM" 2>&1 | tee restart.txt
           if grep -q 'building the runner' restart.txt; then echo "rebuilt an up-to-date runner"; exit 1; fi
           $x stop
 

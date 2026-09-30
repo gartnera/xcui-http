@@ -197,19 +197,32 @@ func tunnelURL(_ identifier: String, port: Int) -> String {
     return "http://[\(ip)]:\(port)"
 }
 
-/// An available iOS Simulator by name or UDID: (udid, name).
-func findSimulator(_ query: String) -> (String, String) {
+struct Simulator {
+    let udid: String
+    let name: String
+    let booted: Bool
+    let runtime: String
+}
+
+/// An available iOS Simulator by name or UDID. A name can match one per iOS
+/// version: prefer a booted one, then the newest iOS.
+func findSimulator(_ query: String) -> Simulator {
     let json = try? JSONSerialization.jsonObject(
         with: run("xcrun", ["simctl", "list", "devices", "available", "--json"])) as? [String: Any]
     let runtimes = json?["devices"] as? [String: [[String: Any]]] ?? [:]
-    let sims = runtimes.filter { $0.key.contains("iOS") }.values.joined().compactMap { d -> (String, String)? in
-        guard let udid = d["udid"] as? String, let name = d["name"] as? String else { return nil }
-        return (udid, name)
+    let sims = runtimes.filter { $0.key.contains("iOS") }.flatMap { runtime, devices in
+        devices.compactMap { d -> Simulator? in
+            guard let udid = d["udid"] as? String, let name = d["name"] as? String else { return nil }
+            return Simulator(udid: udid, name: name, booted: d["state"] as? String == "Booted", runtime: runtime)
+        }
     }
-    guard let sim = sims.first(where: { udid, name in
-        udid.caseInsensitiveCompare(query) == .orderedSame || name.caseInsensitiveCompare(query) == .orderedSame
+    let matches = sims.filter {
+        $0.udid.caseInsensitiveCompare(query) == .orderedSame || $0.name.caseInsensitiveCompare(query) == .orderedSame
+    }
+    guard let sim = matches.max(by: { a, b in
+        a.booted != b.booted ? !a.booted : a.runtime.compare(b.runtime, options: .numeric) == .orderedAscending
     }) else {
-        die("no iOS Simulator \"\(query)\"; have: \(Set(sims.map(\.1)).sorted().joined(separator: ", "))")
+        die("no iOS Simulator \"\(query)\"; have: \(Set(sims.map(\.name)).sorted().joined(separator: ", "))")
     }
     return sim
 }
@@ -297,9 +310,10 @@ func call(_ method: String, _ path: String, _ body: String? = nil) async {
 
 // MARK: - Commands
 
-/// Spawns xcodebuild with output appended to the log. With `detached`, it's in
-/// its own session so it outlives us.
-func spawn(_ arguments: [String], env: [String: String] = [:], log: URL, detached: Bool) -> Int32 {
+/// Spawns a tool (xcodebuild by default) with output appended to the log. With
+/// `detached`, it's in its own session so it outlives us.
+func spawn(_ arguments: [String], tool: String = "/usr/bin/xcodebuild", env: [String: String] = [:],
+           log: URL, detached: Bool) -> Int32 {
     var actions: posix_spawn_file_actions_t?
     posix_spawn_file_actions_init(&actions)
     defer { posix_spawn_file_actions_destroy(&actions) }
@@ -311,13 +325,13 @@ func spawn(_ arguments: [String], env: [String: String] = [:], log: URL, detache
     defer { posix_spawnattr_destroy(&attr) }
     if detached { posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID)) }
 
-    let argv = (["/usr/bin/xcodebuild"] + arguments).map { strdup($0) } + [nil]
+    let argv = ([tool] + arguments).map { strdup($0) } + [nil]
     let merged = ProcessInfo.processInfo.environment.merging(env) { _, new in new }
     let envp = merged.map { strdup("\($0.key)=\($0.value)") } + [nil]
     defer { (argv + envp).forEach { free($0) } }
     var pid: pid_t = 0
-    let rc = posix_spawn(&pid, "/usr/bin/xcodebuild", &actions, &attr, argv, envp)
-    guard rc == 0 else { die("spawning xcodebuild: \(String(cString: strerror(rc)))") }
+    let rc = posix_spawn(&pid, tool, &actions, &attr, argv, envp)
+    guard rc == 0 else { die("spawning \(tool): \(String(cString: strerror(rc)))") }
     return pid
 }
 
@@ -389,6 +403,7 @@ func start(launchArguments: [String]) async {
     var settings: [String]
     var session: Session
     let place: String
+    var simulator: Simulator?
     if let query = flags["device"] {
         let device = findDevice(query)
         guard let team = flags["team"] ?? ProcessInfo.processInfo.environment["XCUIHTTP_TEAM"] else {
@@ -403,7 +418,9 @@ func start(launchArguments: [String]) async {
                           app: app, target: device.identifier, device: device.identifier, port: port)
         place = device.name
     } else {
-        let (udid, name) = findSimulator(flags["sim"] ?? "iPhone 17")
+        let sim = findSimulator(flags["sim"] ?? "iPhone 17")
+        let (udid, name) = (sim.udid, sim.name)
+        simulator = sim
         // Simulators share the Mac's loopback, so each needs its own port.
         let taken = Set(live.filter { $0.device == nil }.map(\.port))
         guard let port = flags["port"].flatMap(Int.init)
@@ -440,8 +457,21 @@ func start(launchArguments: [String]) async {
 
     try? FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
     try? Data().write(to: session.logPath)
+    // A cold Simulator can take minutes to boot (ten on some CI machines), so
+    // boot it alongside the build rather than inside the runner's deadline.
+    var boot: Int32?
+    if let simulator, !simulator.booted {
+        note("booting the Simulator")
+        boot = spawn(["simctl", "bootstatus", simulator.udid, "-b"], tool: "/usr/bin/xcrun",
+                     log: session.logPath, detached: false)
+    }
     build(destination, sdk: session.device == nil ? "iphonesimulator" : "iphoneos", source: source,
           settings: settings, log: session.logPath)
+    if let boot {
+        var status: Int32 = 0
+        waitpid(boot, &status, 0)
+        guard status == 0 else { die("booting the Simulator failed; see \(session.logPath.path)") }
+    }
     if let device = session.device { session.url = tunnelURL(device, port: session.port) }
 
     let test = ["test-without-building"] + common + destination
@@ -481,6 +511,8 @@ func start(launchArguments: [String]) async {
         }
         try? await Task.sleep(nanoseconds: 1_000_000_000)
     }
+    kill(session.pid, SIGTERM)
+    try? FileManager.default.removeItem(at: session.statePath)
     die("timed out waiting for the runner; see \(session.logPath.path)")
 }
 
