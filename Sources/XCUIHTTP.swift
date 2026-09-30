@@ -5,7 +5,7 @@ import Network
 /// one test that serves until `POST /shutdown`; `xcui-http start` (cli/main.swift) runs
 /// it in the background on a Simulator or device and wraps these routes.
 ///
-///     curl localhost:8766/ping                   # replies with the default app's bundle id
+///     curl localhost:8766/ping                   # {"app": default bundle id, "source": build's source hash}
 ///     curl localhost:8766/tree                  # elements on screen, with refs (e1, e2, …)
 ///     curl -d e3 localhost:8766/tap              # tap a ref, an identifier/label, or "x,y"
 ///     curl -d 'Settings' localhost:8766/tap
@@ -41,6 +41,8 @@ final class XCUIHTTP: XCTestCase {
     private static let env = ProcessInfo.processInfo.environment
     static let port = NWEndpoint.Port(env["XCUIHTTP_PORT"] ?? "") ?? 8766
     static let bundleID = env["XCUIHTTP_BUNDLE_ID"].flatMap { $0.isEmpty ? nil : $0 }
+    /// Hash of the sources this was built from (see Runner-Info.plist).
+    static let source = Bundle(for: XCUIHTTP.self).object(forInfoDictionaryKey: "XCUIHTTPSource") as? String ?? "unknown"
 
     private let netQueue = DispatchQueue(label: "xcui-http.net")
     private let lock = NSLock()
@@ -152,7 +154,9 @@ final class XCUIHTTP: XCTestCase {
     private func handle(_ request: Request) -> (Int, Data, String) {
         switch (request.method, request.path) {
         case ("GET", "/ping"):
-            return text(200, "\(Self.bundleID ?? "")\n")
+            let info = ["app": Self.bundleID ?? "", "source": Self.source]
+            return (200, try! JSONSerialization.data(withJSONObject: info, options: .sortedKeys) + Data("\n".utf8),
+                    "application/json")
         case ("POST", "/shutdown"):
             serving = false
             return text(200, "bye\n")

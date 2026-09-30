@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 let usage = """
@@ -45,6 +46,8 @@ struct Session: Codable {
     /// CoreDevice identifier; the URL is re-discovered from it if the tunnel moves.
     var device: String?
     var port: Int
+    /// The runner's source hash, from its /ping.
+    var source: String?
 
     var statePath: URL { sessionsDir.appendingPathComponent("\(name).json") }
     var logPath: URL { sessionsDir.appendingPathComponent("\(name).log") }
@@ -216,6 +219,9 @@ func portFree(_ port: Int) -> Bool {
     let fd = socket(AF_INET, SOCK_STREAM, 0)
     guard fd >= 0 else { return false }
     defer { close(fd) }
+    // A port a stopped runner just closed sits in TIME_WAIT but is reusable.
+    var on: Int32 = 1
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
     addr.sin_port = in_port_t(UInt16(port).bigEndian)
@@ -273,8 +279,17 @@ func query(_ extra: [String: String] = [:]) -> String {
     return items.isEmpty ? "" : "?" + (components.percentEncodedQuery ?? "")
 }
 
+/// The session to act on, with a note if its runner is older than the checkout.
+func loadForAction() -> Session {
+    let session = load()
+    if session.source != sourceHash() {
+        note("session \(session.name) runs an older runner; `xcui-http start` again to update it")
+    }
+    return session
+}
+
 func call(_ method: String, _ path: String, _ body: String? = nil) async {
-    var session = load()
+    var session = loadForAction()
     let (status, data) = await send(&session, method, path, body)
     FileHandle.standardOutput.write(data)
     if status != 200 { exit(1) }
@@ -306,9 +321,31 @@ func spawn(_ arguments: [String], env: [String: String] = [:], log: URL, detache
     return pid
 }
 
+/// A hash of everything the runner is built from, so a build (and a running
+/// session) can be told apart from the current checkout.
+func sourceHash() -> String {
+    let files = ["project.yml", "Runner-Info.plist"].map { root.appendingPathComponent($0) }
+        + ((FileManager.default.enumerator(at: root.appendingPathComponent("Sources"), includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }) ?? [])
+    var hash = SHA256()
+    for file in files.sorted(by: { $0.path < $1.path }) {
+        hash.update(data: Data(file.path.dropFirst(root.path.count).utf8))
+        hash.update(data: (try? Data(contentsOf: file)) ?? Data())
+    }
+    return hash.finalize().prefix(6).map { String(format: "%02x", $0) }.joined()
+}
+
+/// The source hash of the runner already built for this SDK, if any.
+func builtSource(sdk: String) -> String? {
+    let plist = root.appendingPathComponent(
+        "build/Build/Products/Debug-\(sdk)/XCUIHTTP-Runner.app/PlugIns/XCUIHTTP.xctest/Info.plist")
+    return (NSDictionary(contentsOf: plist)?["XCUIHTTPSource"]) as? String
+}
+
 /// Regenerates the project if needed and builds the runner for `destination`,
-/// one build at a time across sessions (they share the derived data).
-func build(_ destination: [String], settings: [String], log: URL) {
+/// unless the build for this SDK is already from `source`. One build at a time
+/// across sessions, since they share the derived data.
+func build(_ destination: [String], sdk: String, source: String, settings: [String], log: URL) {
     try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
     let lock = open(stateDir.appendingPathComponent("build.lock").path, O_CREAT | O_RDWR, 0o644)
     guard lock >= 0 else { die("can't open the build lock in \(stateDir.path)") }
@@ -317,6 +354,7 @@ func build(_ destination: [String], settings: [String], log: URL) {
         note("waiting for another session's build")
         flock(lock, LOCK_EX)
     }
+    if builtSource(sdk: sdk) == source { return }
 
     let spec = root.appendingPathComponent("project.yml")
     guard FileManager.default.fileExists(atPath: spec.path) else {
@@ -330,7 +368,8 @@ func build(_ destination: [String], settings: [String], log: URL) {
     }
 
     note("building the runner")
-    let pid = spawn(["build-for-testing"] + common + destination + settings, log: log, detached: false)
+    let pid = spawn(["build-for-testing"] + common + destination + settings + ["XCUIHTTP_SOURCE=\(source)"],
+                    log: log, detached: false)
     var status: Int32 = 0
     waitpid(pid, &status, 0)
     guard status == 0 else { die("building the runner failed; see \(log.path)") }
@@ -349,6 +388,7 @@ func start(launchArguments: [String]) async {
     let destination: [String]
     var settings: [String]
     var session: Session
+    let place: String
     if let query = flags["device"] {
         let device = findDevice(query)
         guard let team = flags["team"] ?? ProcessInfo.processInfo.environment["XCUIHTTP_TEAM"] else {
@@ -361,7 +401,7 @@ func start(launchArguments: [String]) async {
         settings = ["DEVELOPMENT_TEAM=\(team)", "-allowProvisioningUpdates"]
         session = Session(name: flags["session"] ?? device.name.slug, url: "", token: token, pid: 0,
                           app: app, target: device.identifier, device: device.identifier, port: port)
-        note("starting on \(device.name) (session \(session.name))")
+        place = device.name
     } else {
         let (udid, name) = findSimulator(flags["sim"] ?? "iPhone 17")
         // Simulators share the Mac's loopback, so each needs its own port.
@@ -374,17 +414,34 @@ func start(launchArguments: [String]) async {
         settings = ["CODE_SIGN_IDENTITY=-", "CODE_SIGNING_REQUIRED=NO", "AD_HOC_CODE_SIGNING_ALLOWED=YES"]
         session = Session(name: flags["session"] ?? name.slug, url: "http://localhost:\(port)", pid: 0,
                           app: app, target: udid, port: port)
-        note("starting on the \(name) Simulator (session \(session.name), port \(port))")
+        place = "the \(name) Simulator"
+    }
+    let source = sourceHash()
+    if let existing = live.first(where: { $0.name == session.name || $0.target == session.target }) {
+        // Starting again is how a session is updated: reuse it when it's
+        // current, otherwise replace it.
+        if existing.source == source, existing.app == app, existing.target == session.target {
+            print("serving \(app) at \(existing.url) (session \(existing.name), pid \(existing.pid), already running)")
+            var existing = existing
+            await launch(&existing, launchArguments)
+            return
+        }
+        note(existing.source == source
+            ? "replacing session \(existing.name) (it drives \(existing.app))"
+            : "session \(existing.name) runs an older runner; replacing it")
+        await stop(existing)
+        if flags["port"] == nil, existing.device == nil, existing.target == session.target {
+            session.port = existing.port
+            session.url = "http://localhost:\(existing.port)"
+        }
     }
     env["TEST_RUNNER_XCUIHTTP_PORT"] = String(session.port)
-    if let existing = live.first(where: { $0.name == session.name || $0.target == session.target }) {
-        die("session \(existing.name) is already running there (pid \(existing.pid)); " +
-            "`xcui-http stop --session \(existing.name)` first")
-    }
+    note("starting on \(place) (session \(session.name)\(session.device == nil ? ", port \(session.port)" : ""))")
 
     try? FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
     try? Data().write(to: session.logPath)
-    build(destination, settings: settings, log: session.logPath)
+    build(destination, sdk: session.device == nil ? "iphonesimulator" : "iphoneos", source: source,
+          settings: settings, log: session.logPath)
     if let device = session.device { session.url = tunnelURL(device, port: session.port) }
 
     let test = ["test-without-building"] + common + destination
@@ -414,21 +471,29 @@ func start(launchArguments: [String]) async {
             try? FileManager.default.removeItem(at: session.statePath)
             die("the runner exited before serving; see \(session.logPath.path)")
         }
-        if let (status, _) = try? await attempt(session, "GET", "/ping", timeout: 2), status == 200 {
+        if let (status, data) = try? await attempt(session, "GET", "/ping", timeout: 2), status == 200 {
+            let info = (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
+            session.source = info?["source"]
+            save(session)
             print("serving \(app) at \(session.url) (session \(session.name), pid \(session.pid))")
-            guard flags["no-launch"] == nil else { return }
-            // The runner stays up if this fails, so `launch` can be retried.
-            let (status, data) = await send(&session, "POST", "/launch", launchArguments.joined(separator: " "))
-            guard status == 200 else {
-                FileHandle.standardError.write(data)
-                die("launching \(app) failed; the runner is still serving")
-            }
-            print("launched \(app)")
+            await launch(&session, launchArguments)
             return
         }
         try? await Task.sleep(nanoseconds: 1_000_000_000)
     }
     die("timed out waiting for the runner; see \(session.logPath.path)")
+}
+
+/// Launches the session's app, unless --no-launch. The runner stays up if this
+/// fails, so `launch` can be retried.
+func launch(_ session: inout Session, _ launchArguments: [String]) async {
+    guard flags["no-launch"] == nil else { return }
+    let (status, data) = await send(&session, "POST", "/launch", launchArguments.joined(separator: " "))
+    guard status == 200 else {
+        FileHandle.standardError.write(data)
+        die("launching \(session.app) failed; the runner is still serving")
+    }
+    print("launched \(session.app)")
 }
 
 func stop(_ session: Session) async {
@@ -443,7 +508,8 @@ func stop(_ session: Session) async {
 }
 
 func describe(_ s: Session) -> String {
-    "\(s.name): \(alive(s.pid) ? "running" : "exited") \(s.app) at \(s.url) (pid \(s.pid))"
+    let outdated = s.source != sourceHash() ? ", outdated: `start` again to update" : ""
+    return "\(s.name): \(alive(s.pid) ? "running" : "exited") \(s.app) at \(s.url) (pid \(s.pid)\(outdated))"
 }
 
 let command = args.first ?? "help"
@@ -482,7 +548,7 @@ case "launch", "activate", "terminate":
     await call("POST", "/\(command)" + query(), rest.joined(separator: " "))
 case "screenshot":
     let file = rest.first ?? "screenshot.png"
-    var session = load()
+    var session = loadForAction()
     let path = "/screenshot" + (flags["scale"].map { "?scale=\($0)" } ?? "")
     let (status, data) = await send(&session, "GET", path)
     guard status == 200 else { die(String(decoding: data, as: UTF8.self)) }
