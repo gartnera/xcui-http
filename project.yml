@@ -1,0 +1,36 @@
+name: XCUIHTTP
+options:
+  bundleIdPrefix: com.agartner
+  deploymentTarget:
+    iOS: "16.0"
+
+settings:
+  base:
+    # Leave the team empty so anyone can pass their own (DEVELOPMENT_TEAM=…).
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+
+targets:
+  # An XCUITest that serves HTTP and drives whichever app XCUIHTTP_BUNDLE_ID
+  # names, so it needs no target app of its own.
+  XCUIHTTP:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.agartner.xcuihttp
+        GENERATE_INFOPLIST_FILE: YES
+        # The runner app listens on the network on devices.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Lets development tools drive the UI.
+
+schemes:
+  XCUIHTTP:
+    build:
+      targets:
+        XCUIHTTP: [test]
+    test:
+      targets:
+        - XCUIHTTP
