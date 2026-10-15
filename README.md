@@ -24,7 +24,7 @@ The app must already be installed on the Simulator or device.
 
 ```bash
 xcui-http start --app com.example.app              # Simulator ("iPhone 17"; --sim <name>), launches the app
-xcui-http start --app com.example.app --device <name|udid> --team <team id>
+xcui-http start --app com.example.app --device <name|udid> [--team <team id>]
 xcui-http launch -- --some-flag                    # relaunch with launch arguments (start takes them too)
 xcui-http tree                                     # elements on screen, with refs (e1, e2, …)
 xcui-http tap e3                                   # a ref, an identifier/label, or "x,y"
@@ -35,6 +35,11 @@ xcui-http stop
 ```
 
 `xcui-http help` lists every command.
+
+On a device, the runner is signed for `--team` (or `XCUIHTTP_TEAM`), or else
+the only team with an Apple Development certificate in the keychain. Its
+bundle id is `com.agartner.xcuihttp.<team>`, so each team has its own runner
+on the device and Macs signed into different teams can share one.
 
 Several Simulators and devices can run at once. Each `start` makes a session
 named after its Simulator or device (`--session` to pick another name); each

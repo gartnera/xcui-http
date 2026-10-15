@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 
 let usage = """
     xcui-http: start, drive and stop xcui-http runners.
@@ -17,8 +18,9 @@ let usage = """
       xcui-http raw <GET|POST> <path> [body]
 
     Actions take --app <bundle id|springboard>, --no-idle (skip XCUITest's idle
-    waits) and --settle <seconds>. A device needs --team (or XCUIHTTP_TEAM) to
-    sign the runner.
+    waits) and --settle <seconds>. A device's runner is signed for --team (or
+    XCUIHTTP_TEAM), else the only team with a development certificate in the
+    keychain, and each team gets its own runner (com.agartner.xcuihttp.<team>).
 
     Several Simulators and devices can run at once, one session each, named
     after the Simulator or device (or --session). Commands pick one with
@@ -188,6 +190,50 @@ func findDevice(_ query: String) -> Device {
     return device
 }
 
+/// Teams with a valid Apple Development certificate in the keychain: the
+/// certificate's OU is the team id and its O the team name.
+func signingTeams() -> [(id: String, name: String)] {
+    let query: [CFString: Any] = [kSecClass: kSecClassIdentity, kSecMatchLimit: kSecMatchLimitAll,
+                                  kSecMatchValidOnDate: Date(), kSecReturnRef: true]
+    var result: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+          let identities = result as? [SecIdentity] else { return [] }
+    var teams: [String: String] = [:]
+    for identity in identities {
+        var certificate: SecCertificate?
+        guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess, let certificate,
+              let summary = SecCertificateCopySubjectSummary(certificate) as String?,
+              summary.hasPrefix("Apple Development:") || summary.hasPrefix("iPhone Developer:"),
+              let values = SecCertificateCopyValues(certificate, [kSecOIDX509V1SubjectName] as CFArray, nil)
+                as? [String: Any],
+              let subject = (values[kSecOIDX509V1SubjectName as String] as? [String: Any])?[kSecPropertyKeyValue as String]
+                as? [[String: Any]] else { continue }
+        func field(_ oid: CFString) -> String? {
+            subject.first { $0[kSecPropertyKeyLabel as String] as? String == oid as String }?[kSecPropertyKeyValue as String]
+                as? String
+        }
+        if let id = field(kSecOIDOrganizationalUnitName) { teams[id] = field(kSecOIDOrganizationName) ?? id }
+    }
+    return teams.map { (id: $0.key, name: $0.value) }.sorted { $0.id < $1.id }
+}
+
+/// The team to sign a device's runner with: --team, XCUIHTTP_TEAM, or the only
+/// team the keychain can sign for.
+func signingTeam() -> String {
+    if let team = flags["team"] ?? ProcessInfo.processInfo.environment["XCUIHTTP_TEAM"] { return team }
+    let teams = signingTeams()
+    switch teams.count {
+    case 1:
+        note("signing for team \(teams[0].id) (\(teams[0].name)); --team to pick another")
+        return teams[0].id
+    case 0:
+        die("no Apple Development certificate in the keychain; pass --team <team id> (or set XCUIHTTP_TEAM)")
+    default:
+        die("several teams can sign (\(teams.map { "\($0.id) \($0.name)" }.joined(separator: ", "))); " +
+            "pass --team <team id> (or set XCUIHTTP_TEAM)")
+    }
+}
+
 /// The device's CoreDevice tunnel address; asking for details brings the tunnel up.
 func tunnelURL(_ identifier: String, port: Int) -> String {
     let details = devicectl(["device", "info", "details", "--device", identifier])
@@ -349,17 +395,18 @@ func sourceHash() -> String {
     return hash.finalize().prefix(6).map { String(format: "%02x", $0) }.joined()
 }
 
-/// The source hash of the runner already built for this SDK, if any.
-func builtSource(sdk: String) -> String? {
+/// Whether the runner already built for this SDK is from `source` with `bundleID`.
+func isBuilt(sdk: String, source: String, bundleID: String) -> Bool {
     let plist = root.appendingPathComponent(
         "build/Build/Products/Debug-\(sdk)/XCUIHTTP-Runner.app/PlugIns/XCUIHTTP.xctest/Info.plist")
-    return (NSDictionary(contentsOf: plist)?["XCUIHTTPSource"]) as? String
+    let info = NSDictionary(contentsOf: plist)
+    return info?["XCUIHTTPSource"] as? String == source && info?["CFBundleIdentifier"] as? String == bundleID
 }
 
 /// Regenerates the project if needed and builds the runner for `destination`,
-/// unless the build for this SDK is already from `source`. One build at a time
-/// across sessions, since they share the derived data.
-func build(_ destination: [String], sdk: String, source: String, settings: [String], log: URL) {
+/// unless the build for this SDK is already from `source` with `bundleID`. One
+/// build at a time across sessions, since they share the derived data.
+func build(_ destination: [String], sdk: String, source: String, bundleID: String, settings: [String], log: URL) {
     try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
     let lock = open(stateDir.appendingPathComponent("build.lock").path, O_CREAT | O_RDWR, 0o644)
     guard lock >= 0 else { die("can't open the build lock in \(stateDir.path)") }
@@ -368,7 +415,7 @@ func build(_ destination: [String], sdk: String, source: String, settings: [Stri
         note("waiting for another session's build")
         flock(lock, LOCK_EX)
     }
-    if builtSource(sdk: sdk) == source { return }
+    if isBuilt(sdk: sdk, source: source, bundleID: bundleID) { return }
 
     let spec = root.appendingPathComponent("project.yml")
     guard FileManager.default.fileExists(atPath: spec.path) else {
@@ -389,6 +436,10 @@ func build(_ destination: [String], sdk: String, source: String, settings: [Stri
     guard status == 0 else { die("building the runner failed; see \(log.path)") }
 }
 
+/// The runner's bundle id in project.yml. A device's runner appends its team,
+/// since a bundle id belongs to one team and a device won't replace an app with
+/// one signed by another: each team gets its own runner.
+let runnerBundleID = "com.agartner.xcuihttp"
 let project = root.appendingPathComponent("XCUIHTTP.xcodeproj")
 let common = ["-project", project.path, "-scheme", "XCUIHTTP",
               "-derivedDataPath", root.appendingPathComponent("build").path]
@@ -401,19 +452,19 @@ func start(launchArguments: [String]) async {
     var env = ["TEST_RUNNER_XCUIHTTP_BUNDLE_ID": app]
     let destination: [String]
     var settings: [String]
+    var bundleID = runnerBundleID
     var session: Session
     let place: String
     var simulator: Simulator?
     if let query = flags["device"] {
         let device = findDevice(query)
-        guard let team = flags["team"] ?? ProcessInfo.processInfo.environment["XCUIHTTP_TEAM"] else {
-            die("a device needs --team <team id> (or XCUIHTTP_TEAM) to sign the runner")
-        }
+        let team = signingTeam()
         let port = flags["port"].flatMap(Int.init) ?? 8766
         let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         env["TEST_RUNNER_XCUIHTTP_TOKEN"] = token
         destination = ["-destination", "id=\(device.udid)"]
-        settings = ["DEVELOPMENT_TEAM=\(team)", "-allowProvisioningUpdates"]
+        bundleID = "\(runnerBundleID).\(team)"
+        settings = ["DEVELOPMENT_TEAM=\(team)", "PRODUCT_BUNDLE_IDENTIFIER=\(bundleID)", "-allowProvisioningUpdates"]
         session = Session(name: flags["session"] ?? device.name.slug, url: "", token: token, pid: 0,
                           app: app, target: device.identifier, device: device.identifier, port: port)
         place = device.name
@@ -466,7 +517,7 @@ func start(launchArguments: [String]) async {
                      log: session.logPath, detached: false)
     }
     build(destination, sdk: session.device == nil ? "iphonesimulator" : "iphoneos", source: source,
-          settings: settings, log: session.logPath)
+          bundleID: bundleID, settings: settings, log: session.logPath)
     if let boot {
         var status: Int32 = 0
         waitpid(boot, &status, 0)
