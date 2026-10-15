@@ -30,10 +30,18 @@ let usage = """
     in <name>.log next to it.
     """
 
+/// An environment variable's value. Set but empty is an error rather than unset
+/// or the current directory: it's usually a shell variable that didn't expand.
+func environment(_ name: String) -> String? {
+    guard let value = ProcessInfo.processInfo.environment[name] else { return nil }
+    guard !value.isEmpty else { die("\(name) is set but empty; unset it or give it a value") }
+    return value
+}
+
 /// The checkout this was built from, where project.yml lives.
-let root = ProcessInfo.processInfo.environment["XCUIHTTP_ROOT"].map { URL(fileURLWithPath: $0) }
+let root = environment("XCUIHTTP_ROOT").map { URL(fileURLWithPath: $0) }
     ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-let stateDir = ProcessInfo.processInfo.environment["XCUIHTTP_STATE_DIR"].map { URL(fileURLWithPath: $0) }
+let stateDir = environment("XCUIHTTP_STATE_DIR").map { URL(fileURLWithPath: $0) }
     ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/xcui-http")
 let sessionsDir = stateDir.appendingPathComponent("sessions")
 
@@ -102,7 +110,7 @@ func allSessions() -> [Session] {
 /// The session named by --session or XCUIHTTP_SESSION, else the only one running.
 func load() -> Session {
     let sessions = allSessions()
-    if let name = flags["session"] ?? ProcessInfo.processInfo.environment["XCUIHTTP_SESSION"] {
+    if let name = flags["session"] ?? environment("XCUIHTTP_SESSION") {
         guard let session = sessions.first(where: { $0.name == name }) else {
             die("no session \"\(name)\"; have: \(sessions.map(\.name).joined(separator: ", ").nonEmpty ?? "none")")
         }
@@ -220,7 +228,7 @@ func signingTeams() -> [(id: String, name: String)] {
 /// The team to sign a device's runner with: --team, XCUIHTTP_TEAM, or the only
 /// team the keychain can sign for.
 func signingTeam() -> String {
-    if let team = flags["team"] ?? ProcessInfo.processInfo.environment["XCUIHTTP_TEAM"] { return team }
+    if let team = flags["team"] ?? environment("XCUIHTTP_TEAM") { return team }
     let teams = signingTeams()
     switch teams.count {
     case 1:
