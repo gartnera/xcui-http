@@ -46,6 +46,8 @@ then `disabled` / `selected`. Indentation is nesting.
 - Relaunch with launch arguments: `xcui-http launch -- -SomeFlag YES`.
 - A sheet that loads slowly may not be in the returned tree yet; raise
   `--settle <seconds>` (default 3) or call `tree` again.
+- Each action waits up to 3 s for the app to go idle before and after the
+  event; `--idle <seconds>` to wait longer, `--idle 0` to skip.
 - `press` long-presses (`--seconds`), e.g. for context menus.
 - Several sessions can run at once (one per Simulator/device). With more than
   one, pass `--session <name>`; `xcui-http list` shows them.

@@ -12,7 +12,7 @@ import Network
 ///     curl -d 'hello' localhost:8766/type        # type into the focused field ("\n" = return)
 ///     curl -d 'down' localhost:8766/swipe        # swipe the app, or "down <identifier/label>"
 ///     curl -d 'e3 200,600' localhost:8766/drag   # press and drag from one point/ref to another
-///     curl -d e3 'localhost:8766/press?seconds=1.5'   # long-press (default 1 s); skips the idle waits
+///     curl -d e3 'localhost:8766/press?seconds=1.5'   # long-press (default 1 s); ?idle=0 by default
 ///     curl -d home localhost:8766/button         # press home (wakes the screen), or "lock"
 ///     curl -d left localhost:8766/orientation    # rotate: portrait, or left/right (landscape)
 ///     curl localhost:8766/screenshot > s.png
@@ -24,10 +24,10 @@ import Network
 /// `com.apple.Preferences`), and `?app=springboard` the home screen and system
 /// alerts.
 ///
-/// XCUITest waits for the app to go idle before and after each event, and an
-/// open context menu never does, so each wait runs to its one-minute timeout.
-/// `/press` skips those waits; `?idle=0` skips them for any other action (e.g.
-/// tapping an item in the menu `/press` opened).
+/// XCUITest waits for the app to go idle before and after each event, by
+/// default for up to a minute, and some apps (an open context menu, a looping
+/// animation) never do. Each wait here gives up after `?idle=<seconds>`
+/// (default 3); `?idle=0` skips them, as `/press` does by default.
 ///
 /// The Simulator shares the Mac's network, so there it listens on loopback
 /// only. On a device it listens on all interfaces, and requests from off the
@@ -61,21 +61,37 @@ final class XCUIHTTP: XCTestCase {
         issues.append(issue.compactDescription)
     }
 
-    /// Read by the idle-wait hook; set per request.
-    private static var skipIdleWait = false
+    static let defaultIdleTimeout: TimeInterval = 3
+    /// Most seconds each idle wait may take (0 skips it); read by the
+    /// idle-wait hook, set per request.
+    private static var idleTimeout = defaultIdleTimeout
 
-    /// Makes XCUITest's idle wait (private, the hook WebDriverAgent uses too)
-    /// a no-op while `skipIdleWait` is set.
+    /// Caps XCUITest's idle wait at `idleTimeout`, through private API that
+    /// WebDriverAgent uses too: the wait itself, and the timeout it uses (also
+    /// used for app-state waits like launch's, so it's only changed around it).
     private static let idleWaitHook: Void = {
         let selector = NSSelectorFromString("waitForQuiescenceIncludingAnimationsIdle:isPreEvent:")
         guard let cls = NSClassFromString("XCUIApplicationProcess"),
               let method = class_getInstanceMethod(cls, selector) else {
-            return print("[xcui-http] idle-wait hook not found; /press and ?idle=0 will still wait")
+            return print("[xcui-http] idle-wait hook not found; idle waits take up to XCUITest's timeout")
         }
         typealias Wait = @convention(c) (AnyObject, Selector, Bool, Bool) -> Void
+        typealias GetTimeout = @convention(c) () -> Double
+        typealias SetTimeout = @convention(c) (Double) -> Void
         let original = unsafeBitCast(method_getImplementation(method), to: Wait.self)
+        let rtldDefault = UnsafeMutableRawPointer(bitPattern: -2)
+        let getTimeout = dlsym(rtldDefault, "_XCTApplicationStateTimeout").map { unsafeBitCast($0, to: GetTimeout.self) }
+        let setTimeout = dlsym(rtldDefault, "_XCTSetApplicationStateTimeout").map { unsafeBitCast($0, to: SetTimeout.self) }
+        if getTimeout == nil || setTimeout == nil {
+            print("[xcui-http] _XCTSetApplicationStateTimeout not found; idle waits take up to XCUITest's timeout")
+        }
         let hook: @convention(block) (AnyObject, Bool, Bool) -> Void = { process, animations, preEvent in
-            if !skipIdleWait { original(process, selector, animations, preEvent) }
+            guard idleTimeout > 0 else { return }
+            guard let getTimeout, let setTimeout else { return original(process, selector, animations, preEvent) }
+            let previous = getTimeout()
+            setTimeout(idleTimeout)
+            defer { setTimeout(previous) }
+            original(process, selector, animations, preEvent)
         }
         method_setImplementation(method, imp_implementationWithBlock(hook))
     }()
@@ -169,8 +185,9 @@ final class XCUIHTTP: XCTestCase {
         let target = XCUIApplication(bundleIdentifier: bundleID)
         let body = request.body.trimmingCharacters(in: .whitespacesAndNewlines)
         issues = []
-        Self.skipIdleWait = request.path == "/press" || request.query["idle"] == "0"
-        defer { Self.skipIdleWait = false }
+        Self.idleTimeout = request.query["idle"].flatMap(Double.init)
+            ?? (request.path == "/press" ? 0 : Self.defaultIdleTimeout)
+        defer { Self.idleTimeout = Self.defaultIdleTimeout }
         var acted = true
         switch (request.method, request.path) {
         case ("GET", "/tree"):

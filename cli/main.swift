@@ -17,9 +17,10 @@ let usage = """
       xcui-http screenshot [file.png]          (default: screenshot.png; 1x, --scale 3 for more)
       xcui-http raw <GET|POST> <path> [body]
 
-    Actions take --app <bundle id|springboard>, --no-idle (skip XCUITest's idle
-    waits) and --settle <seconds> (most to wait for the tree to stop changing,
-    default 3). A device's runner is signed for --team (or
+    Actions take --app <bundle id|springboard>, --idle <seconds> (most to wait
+    for the app to go idle before and after each event, default 3; 0 skips,
+    as press does by default) and --settle <seconds> (most to wait for the
+    tree to stop changing, default 3). A device's runner is signed for --team (or
     XCUIHTTP_TEAM), else the only team with a development certificate in the
     keychain, and each team gets its own runner (com.agartner.xcuihttp.<team>).
 
@@ -67,7 +68,7 @@ func note(_ message: String) {
 
 // MARK: - Arguments
 
-let valued: Set<String> = ["app", "sim", "device", "team", "port", "seconds", "settle", "scale", "session"]
+let valued: Set<String> = ["app", "sim", "device", "team", "port", "seconds", "idle", "settle", "scale", "session"]
 let (flags, args) = { () -> ([String: String], [String]) in
     var flags: [String: String] = [:]
     var args: [String] = []
@@ -332,7 +333,7 @@ func send(_ session: inout Session, _ method: String, _ path: String, _ body: St
 func query(_ extra: [String: String] = [:]) -> String {
     var items = extra.map { URLQueryItem(name: $0.key, value: $0.value) }
     if let app = flags["app"] { items.append(URLQueryItem(name: "app", value: app)) }
-    if flags["no-idle"] != nil { items.append(URLQueryItem(name: "idle", value: "0")) }
+    if let idle = flags["idle"] { items.append(URLQueryItem(name: "idle", value: idle)) }
     if let settle = flags["settle"] { items.append(URLQueryItem(name: "settle", value: settle)) }
     var components = URLComponents()
     components.queryItems = items
