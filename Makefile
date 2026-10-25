@@ -2,7 +2,8 @@
 #
 #   make project   generate XCUIHTTP.xcodeproj (needs: brew install xcodegen)
 #   make build     build the runner for the Simulator
-#   make install   install the `xcui-http` CLI to $(PREFIX)/bin
+#   make install   install the `xcui-http` CLI to $(PREFIX)/bin, and link its
+#                  Claude Code skill into ~/.claude/skills if ~/.claude exists
 #
 # Then: xcui-http start --app <bundle id>  (xcui-http help for the rest)
 
@@ -26,6 +27,10 @@ install:
 	swift build -c release
 	install -d $(PREFIX)/bin
 	install .build/release/xcui-http $(PREFIX)/bin/xcui-http
+	if [ -d $(HOME)/.claude ]; then \
+	  install -d $(HOME)/.claude/skills && \
+	  ln -sfn $(CURDIR)/.claude/skills/xcui-http $(HOME)/.claude/skills/xcui-http; \
+	fi
 
 clean:
 	rm -rf $(DERIVED) .build

@@ -18,6 +18,9 @@ make install        # xcui-http into ~/.local/bin (PREFIX=… to change)
 `xcui-http` builds and runs the runner from this checkout, so keep it where it
 is (or point `XCUIHTTP_ROOT` at it).
 
+If you use Claude Code (`~/.claude` exists), `make install` also links the
+[Claude Code skill](.claude/skills/xcui-http/SKILL.md) into `~/.claude/skills`, so Claude knows to use `xcui-http` in any project.
+
 ## Usage
 
 The app must already be installed on the Simulator or device.
