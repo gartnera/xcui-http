@@ -18,7 +18,8 @@ let usage = """
       xcui-http raw <GET|POST> <path> [body]
 
     Actions take --app <bundle id|springboard>, --no-idle (skip XCUITest's idle
-    waits) and --settle <seconds>. A device's runner is signed for --team (or
+    waits) and --settle <seconds> (most to wait for the tree to stop changing,
+    default 3). A device's runner is signed for --team (or
     XCUIHTTP_TEAM), else the only team with a development certificate in the
     keychain, and each team gets its own runner (com.agartner.xcuihttp.<team>).
 

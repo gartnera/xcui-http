@@ -86,9 +86,12 @@ listens on all interfaces and requires `X-Driver-Token` from off the device.
 | `POST /launch` | space-separated launch arguments |
 | `POST /activate`, `/terminate`, `/shutdown` | |
 
-Actions reply with the tree once the UI settles (`?settle=<seconds>`, default
-0.5). `?app=<bundle id>` targets another app, and `?idle=0` skips XCUITest's
-idle waits (`/press` always does, since an open context menu never goes idle).
+Actions reply with the tree once it stops changing, so a sheet whose content
+loads late (like the out-of-process file and photo pickers) is in it; they give
+up waiting after `?settle=<seconds>` (default 3). A label or identifier
+matches buttons and other controls before static text. `?app=<bundle id>`
+targets another app, and `?idle=0` skips XCUITest's idle waits (`/press`
+always does, since an open context menu never goes idle).
 
 The runner reads `XCUIHTTP_BUNDLE_ID`, `XCUIHTTP_PORT` and `XCUIHTTP_TOKEN`
 from its environment (`TEST_RUNNER_<name>` when passed to `xcodebuild`).

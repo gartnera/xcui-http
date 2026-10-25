@@ -243,12 +243,21 @@ final class XCUIHTTP: XCTestCase {
         default:
             return text(404, "GET /ping /tree /screenshot; POST /tap /type /swipe /drag /press /button /orientation /launch /activate /terminate /shutdown\n")
         }
+        var listing = tree(target)
         if acted {
-            let settle = request.query["settle"].flatMap(Double.init) ?? 0.5
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: settle))
+            // Settled once two trees a poll apart match, up to `settle` seconds: a
+            // sheet's out-of-process content (a file or photo picker) arrives after
+            // the tap's idle wait.
+            let deadline = Date(timeIntervalSinceNow: request.query["settle"].flatMap(Double.init) ?? 3)
+            while Date() < deadline {
+                RunLoop.current.run(until: min(deadline, Date(timeIntervalSinceNow: 0.3)))
+                let next = tree(target)
+                if next == listing { break }
+                listing = next
+            }
         }
         let failures = issues.isEmpty ? "" : issues.map { "! \($0)\n" }.joined()
-        return text(issues.isEmpty ? 200 : 500, failures + tree(target))
+        return text(issues.isEmpty ? 200 : 500, failures + listing)
     }
 
     /// One line per meaningful element, indented under its meaningful ancestors:
@@ -303,11 +312,15 @@ final class XCUIHTTP: XCTestCase {
         return match.exists ? match.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)) : nil
     }
 
-    /// Exact identifier/label match, else a case-insensitive label substring.
+    /// Exact identifier/label match, else a case-insensitive label substring;
+    /// controls first, so "Convert" finds the button, not a title reading the same.
     private func element(_ query: String, in app: XCUIApplication) -> XCUIElement {
         let all = app.descendants(matching: .any)
-        let exact = all.matching(NSPredicate(format: "identifier == %@ OR label == %@", query, query)).firstMatch
-        return exact.exists ? exact : all.matching(NSPredicate(format: "label CONTAINS[c] %@", query)).firstMatch
+        let controls = all.matching(NSPredicate(format: "elementType IN %@", Self.interactive.map(\.rawValue)))
+        let exact = NSPredicate(format: "identifier == %@ OR label == %@", query, query)
+        let partial = NSPredicate(format: "label CONTAINS[c] %@", query)
+        let candidates = [controls.matching(exact), all.matching(exact), controls.matching(partial), all.matching(partial)]
+        return candidates.map(\.firstMatch).first(where: \.exists) ?? all.matching(partial).firstMatch
     }
 
     private func notFound(_ query: String) -> (Int, Data, String) {
