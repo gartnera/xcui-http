@@ -1,6 +1,6 @@
 ---
 name: xcui-http
-description: Drive, inspect and screenshot any installed iOS app's UI on a Simulator or device with the xcui-http CLI (XCUITest over HTTP) - read the element tree, tap, type, swipe, drag, long-press, rotate, press home/lock, handle system alerts. Use to check an iOS change in the running app, reproduce a UI bug, or walk through a flow.
+description: Drive, inspect and screenshot any installed iOS app's UI on a Simulator or device with the xcui-http CLI (XCUITest over HTTP) - read the element tree, tap, type and fill fields, scroll to elements, wait for them, open deep links, swipe, drag, long-press, pinch, rotate, press home/lock, handle system alerts. Use to check an iOS change in the running app, reproduce a UI bug, or walk through a flow.
 ---
 
 # xcui-http
@@ -14,7 +14,12 @@ xcui-http start --app com.example.app    # Simulator "iPhone 17" (--sim <name|ud
 xcui-http tree                           # elements on screen, with refs
 xcui-http tap e3                         # a ref, an identifier/label, or "x,y" in points
 xcui-http type $'hello\n'                # into the focused field; a trailing newline presses return
+xcui-http fill Email me@example.com      # tap a field, clear it, type
+xcui-http tap "Sign Out" --scroll        # scroll down until it's fully on screen, then tap (--scroll=up…)
+xcui-http wait "Welcome" --timeout 20    # until it's on screen; --gone until it isn't (spinners)
+xcui-http open 'myapp://settings'        # deep link straight to a screen
 xcui-http screenshot /tmp/s.png          # then Read it to look at it
+xcui-http screenshot /tmp/s.png --annotate   # prints the tree; the image outlines controls with their refs
 xcui-http stop
 ```
 
@@ -36,6 +41,12 @@ then `disabled` / `selected`. Indentation is nesting.
   there's no need to call `tree` again after one.
 - Prefer a label or identifier (`xcui-http tap "Sign In"`) when it's unique;
   it matches controls before static text.
+- The tree, and labels, only cover what's on screen. Lists build rows
+  lazily, so pass `--scroll` to `tap`/`doubletap`/`press`/`fill` to reach
+  one further along (`scroll down <label>` to only scroll).
+- Use `--annotate` to find an unlabeled icon button's ref.
+- Use `wait` instead of sleeping when something loads for more than a few
+  seconds.
 - Screenshots are 1x, so their pixels are the tree's points; `--scale 3` for
   full resolution.
 
@@ -48,7 +59,8 @@ then `disabled` / `selected`. Indentation is nesting.
   `--settle <seconds>` (default 3) or call `tree` again.
 - Each action waits up to 3 s for the app to go idle before and after the
   event; `--idle <seconds>` to wait longer, `--idle 0` to skip.
-- `press` long-presses (`--seconds`), e.g. for context menus.
+- `press` long-presses (`--seconds`), e.g. for context menus. Also
+  `doubletap`, `pinch <scale> [label]`, `twofingertap <label>`.
 - Several sessions can run at once (one per Simulator/device). With more than
   one, pass `--session <name>`; `xcui-http list` shows them.
 - On a device: `--device <name|udid>` (and `--team <id>` if the keychain has

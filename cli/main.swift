@@ -10,11 +10,23 @@ let usage = """
       xcui-http list | status | stop [--all] | env | log
       xcui-http tree
       xcui-http tap <ref|label|x,y>            xcui-http press <ref|label|x,y> [--seconds 1.5]
-      xcui-http type <text>                    xcui-http drag <from> <to> [hold seconds]
+      xcui-http doubletap <ref|label|x,y>      xcui-http drag <from> <to> [hold seconds]
+      xcui-http type <text>                    (into the focused field; a trailing newline presses return)
+      xcui-http fill <ref|label|x,y> <text>    (tap a field, clear it, type)
       xcui-http swipe <up|down|left|right> [identifier/label]
+      xcui-http scroll <down|up|left|right> <identifier/label> [--max 10]
+                                               (drag in steps until it's fully on screen; or
+                                               tap/doubletap/press/fill --scroll [up|left|right])
+      xcui-http wait <identifier/label> [--gone] [--timeout 10]
+                                               (until it's on screen, or with --gone, until it isn't)
+      xcui-http pinch <scale> [identifier/label]   (>1 zooms in)
+      xcui-http twofingertap <identifier/label>    (not a screen-sized element: XCUITest can't)
+      xcui-http open <url>                     (a deep link, in the app; iOS 16.4+)
       xcui-http button <home|lock>             xcui-http orientation <portrait|left|right>
       xcui-http launch [-- args…]              xcui-http activate | terminate
-      xcui-http screenshot [file.png]          (default: screenshot.png; 1x, --scale 3 for more)
+      xcui-http screenshot [file.png] [--annotate]
+                                               (default: screenshot.png; 1x, --scale 3 for more;
+                                               --annotate prints the tree and outlines its controls)
       xcui-http raw <GET|POST> <path> [body]
 
     Actions take --app <bundle id|springboard>, --idle <seconds> (most to wait
@@ -68,7 +80,8 @@ func note(_ message: String) {
 
 // MARK: - Arguments
 
-let valued: Set<String> = ["app", "sim", "device", "team", "port", "seconds", "idle", "settle", "scale", "session"]
+let valued: Set<String> = ["app", "sim", "device", "team", "port", "seconds", "idle", "settle", "scale", "session",
+                           "timeout", "max"]
 let (flags, args) = { () -> ([String: String], [String]) in
     var flags: [String: String] = [:]
     var args: [String] = []
@@ -83,8 +96,11 @@ let (flags, args) = { () -> ([String: String], [String]) in
         if valued.contains(parts[0]) {
             guard let value = parts.count > 1 ? parts[1] : argv.popFirst() else { die("--\(parts[0]) needs a value") }
             flags[parts[0]] = value
+        } else if parts[0] == "scroll", parts.count == 1, let next = argv.first,
+                  ["down", "up", "left", "right"].contains(next) {
+            flags["scroll"] = argv.popFirst()   // --scroll up
         } else {
-            flags[parts[0]] = ""
+            flags[parts[0]] = parts.count > 1 ? parts[1] : ""   // optional value: --scroll or --scroll=up
         }
     }
     return (flags, args)
@@ -338,6 +354,12 @@ func query(_ extra: [String: String] = [:]) -> String {
     var components = URLComponents()
     components.queryItems = items
     return items.isEmpty ? "" : "?" + (components.percentEncodedQuery ?? "")
+}
+
+/// `?scroll=` for --scroll (down) or --scroll=<direction>, on the commands that take a target.
+func scrollQuery() -> [String: String] {
+    guard let scroll = flags["scroll"], ["tap", "doubletap", "press", "fill"].contains(command) else { return [:] }
+    return ["scroll": scroll.isEmpty ? "down" : scroll]
 }
 
 /// The session to act on, with a note if its runner is older than the checkout.
@@ -625,17 +647,35 @@ case "log":
     FileHandle.standardOutput.write(data)
 case "tree":
     await call("GET", "/tree" + query())
-case "tap", "press", "type", "swipe", "drag", "button", "orientation":
+case "tap", "doubletap", "press", "type", "swipe", "scroll", "wait", "pinch", "twofingertap", "open", "drag", "button",
+     "orientation":
     guard !rest.isEmpty else { die("\(command) needs an argument") }
-    let extra = command == "press" ? flags["seconds"].map { ["seconds": $0] } ?? [:] : [:]
+    var extra = scrollQuery()
+    extra["seconds"] = command == "press" ? flags["seconds"] : nil
+    extra["max"] = command == "scroll" || extra["scroll"] != nil ? flags["max"] : nil
+    extra["timeout"] = command == "wait" ? flags["timeout"] : nil
+    extra["gone"] = command == "wait" && flags["gone"] != nil ? "1" : nil
     await call("POST", "/\(command)" + query(extra), rest.joined(separator: " "))
+case "fill":
+    guard rest.count >= 2 else { die("fill <ref|label|x,y> <text>") }
+    var extra = scrollQuery()
+    extra["max"] = extra["scroll"] != nil ? flags["max"] : nil
+    await call("POST", "/fill" + query(extra), rest[0] + "\n" + rest.dropFirst().joined(separator: " "))
 case "launch", "activate", "terminate":
     await call("POST", "/\(command)" + query(), rest.joined(separator: " "))
 case "screenshot":
     let file = rest.first ?? "screenshot.png"
     var session = loadForAction()
-    let path = "/screenshot" + (flags["scale"].map { "?scale=\($0)" } ?? "")
-    let (status, data) = await send(&session, "GET", path)
+    var items: [String: String] = [:]
+    items["scale"] = flags["scale"]
+    if flags["annotate"] != nil {
+        // The tree first, so the refs drawn are the ones printed.
+        let (status, data) = await send(&session, "GET", "/tree" + query())
+        FileHandle.standardOutput.write(data)
+        guard status == 200 else { exit(1) }
+        items["annotate"] = "1"
+    }
+    let (status, data) = await send(&session, "GET", "/screenshot" + query(items))
     guard status == 200 else { die(String(decoding: data, as: UTF8.self)) }
     do { try data.write(to: URL(fileURLWithPath: file)) } catch { die(error.localizedDescription) }
     print(file)

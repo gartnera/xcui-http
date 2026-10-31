@@ -32,7 +32,14 @@ xcui-http launch -- --some-flag                    # relaunch with launch argume
 xcui-http tree                                     # elements on screen, with refs (e1, e2, …)
 xcui-http tap e3                                   # a ref, an identifier/label, or "x,y"
 xcui-http type $'hello\n'                          # a trailing newline presses return
+xcui-http fill Email me@example.com                # tap a field, clear it, type
+xcui-http scroll down "Privacy & Security"         # drag in steps until it's fully on screen
+xcui-http tap "Privacy & Security" --scroll        # the same, then tap (--scroll=up|left|right; also doubletap/press/fill)
+xcui-http wait "Welcome" --timeout 10              # until it's on screen (--gone: until it isn't)
+xcui-http open 'myapp://item/3'                    # a deep link, in the app
+xcui-http doubletap e3; xcui-http pinch 2 Map      # also twofingertap <label>
 xcui-http screenshot s.png                         # 1x (points); --scale 3 for full resolution
+xcui-http screenshot s.png --annotate              # prints the tree, outlines its controls with their refs
 xcui-http tree --app springboard                   # home screen and system alerts
 xcui-http stop
 ```
@@ -78,10 +85,16 @@ listens on all interfaces and requires `X-Driver-Token` from off the device.
 | --- | --- |
 | `GET /ping` | `{"app": <default bundle id>, "source": <source hash>}` |
 | `GET /tree` | |
-| `GET /screenshot` | PNG at 1x, so pixels match the tree's points; `?scale=` up to the device's (e.g. 3) |
-| `POST /tap` | ref, identifier/label, or `x,y` |
+| `GET /screenshot` | PNG at 1x, so pixels match the tree's points; `?scale=` up to the device's (e.g. 3); `?annotate=1` outlines the last tree's controls with their refs |
+| `POST /tap`, `/doubletap` | ref, identifier/label, or `x,y` |
 | `POST /type` | text (`\n` = return) |
+| `POST /fill` | `<ref, identifier/label or x,y>\n<text>`: taps the field (text fields before other matches), clears it, types |
 | `POST /swipe` | `up\|down\|left\|right [identifier/label]` |
+| `POST /scroll` | `down\|up\|left\|right <identifier/label>`: drags in steps until it's fully on screen; `?max=` drags (default 10); 404 at the end of the content |
+| `POST /wait` | identifier/label: replies once it's on screen, or with `?gone=1` once it isn't; 408 after `?timeout=` (default 10) |
+| `POST /open` | URL, opened in the app (iOS 16.4+) |
+| `POST /pinch` | `<scale> [identifier/label]` (>1 zooms in) |
+| `POST /twofingertap` | identifier/label (XCUITest can't do a screen-sized element) |
 | `POST /drag` | `<from> <to> [hold seconds]` |
 | `POST /press` | ref, identifier/label, or `x,y`; `?seconds=` (default 1) |
 | `POST /button` | `home` or `lock` |
@@ -92,7 +105,9 @@ listens on all interfaces and requires `X-Driver-Token` from off the device.
 Actions reply with the tree once it stops changing, so a sheet whose content
 loads late (like the out-of-process file and photo pickers) is in it; they give
 up waiting after `?settle=<seconds>` (default 3). A label or identifier
-matches buttons and other controls before static text. `?app=<bundle id>`
+matches buttons and other controls before static text, and only what's on
+screen; `?scroll=down|up|left|right` on `/tap`, `/doubletap`, `/press` and
+`/fill` scrolls to it first, as `/scroll` does (`?max=` drags). `?app=<bundle id>`
 targets another app. XCUITest waits for the app to go idle before and after
 each event; each wait gives up after `?idle=<seconds>` (default 3, rather than
 XCUITest's minute), and `?idle=0` skips them, as `/press` does by default
